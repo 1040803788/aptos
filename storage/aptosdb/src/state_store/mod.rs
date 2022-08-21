@@ -41,6 +41,7 @@ use crate::{
     AptosDbError, LedgerStore, TransactionStore, OTHER_TIMERS_SECONDS,
 };
 
+use crate::epoch_by_version::EpochByVersionSchema;
 #[cfg(test)]
 use aptos_types::nibble::nibble_path::NibblePath;
 
@@ -169,6 +170,24 @@ impl StateDb {
             .next()
             .transpose()?
             .and_then(|((_, version), value_opt)| value_opt.map(|value| (version, value))))
+    }
+
+    /// Get the latest ended epoch strictly before required version, i.e. if the passed in version
+    /// ends an epoch, return one epoch early than that.
+    pub fn get_previous_epoch_ending(&self, version: Version) -> Result<Option<(u64, Version)>> {
+        if version == 0 {
+            return Ok(None);
+        }
+        let prev_version = version - 1;
+
+        let mut iter = self
+            .ledger_db
+            .iter::<EpochByVersionSchema>(ReadOptions::default())?;
+        // Search for the end of the previous epoch.
+        iter.seek_for_prev(&prev_version)?;
+        Ok(Some(iter.next().transpose()?.ok_or_else(|| {
+            anyhow!("Ended epoch not found before version {}", version)
+        })?))
     }
 }
 
@@ -572,6 +591,7 @@ impl StateStore {
             node_hashes,
             version,
             base_version,
+            None, // previous epoch ending version
         )?;
         self.state_merkle_db.write_schemas(batch)?;
         Ok(hash)
