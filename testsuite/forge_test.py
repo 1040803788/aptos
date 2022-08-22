@@ -1,3 +1,4 @@
+import json
 import os
 import unittest
 from datetime import datetime, timezone
@@ -7,9 +8,9 @@ from typing import Dict, List, OrderedDict, Sequence, Union
 from click.testing import CliRunner
 from .forge import (
     AwsError, FakeTime, ForgeFormatter, ForgeResult, ForgeState,
-    Git, K8sForgeRunner, assert_aws_token_expiration, find_recent_image,
+    Git, K8sForgeRunner, assert_aws_token_expiration, find_recent_images,
     format_pre_comment, get_dashboard_link, get_humio_logs_link,
-    get_validator_logs_link, main, ForgeContext, LocalForgeRunner, FakeShell,
+    get_validator_logs_link, list_eks_clusters, main, ForgeContext, LocalForgeRunner, FakeShell,
     FakeFilesystem, RunResult, FakeProcesses
 )
 
@@ -79,8 +80,9 @@ def fake_context(shell=None, filesystem=None, processes=None, time=None) -> Forg
         aws_account_num="123",
         aws_region="banana-east-1",
 
-        forge_image_tag="asdf",
-        forge_upgrade_image_tag="asdf-1",
+        forge_image_tag="forge_asdf",
+        image_tag="asdf",
+        upgrade_image_tag="upgrade_asdf",
         forge_namespace="potato",
         forge_cluster_name="tomato",
 
@@ -93,8 +95,8 @@ class ForgeRunnerTests(unittest.TestCase):
         shell = SpyShell({
             'cargo run -p forge-cli -- --suite banana --mempool-backlog 5000 '
             '--avg-tps 593943 --max-latency-ms 6000 --duration-secs 123 test '
-            'k8s-swarm --image-tag asdf --upgrade-image-tag asdf-1 --namespac'
-            'e potato --port-forward': RunResult(0, b"orange"),
+            'k8s-swarm --image-tag asdf --upgrade-image-tag upgrade_asdf --na'
+            'mespace potato --port-forward': RunResult(0, b"orange"),
         })
         filesystem = SpyFilesystem({}, {})
         context = fake_context(shell, filesystem)
@@ -150,24 +152,24 @@ class TestAWSTokenExpiration(unittest.TestCase):
 class TestFindRecentImage(unittest.TestCase):
     def testFindRecentImage(self):
         shell = SpyShell(OrderedDict([
-            ("git rev-parse HEAD~0", RunResult(0, b"potato")),
+            ("git rev-parse HEAD~0", RunResult(0, b"potato\n")),
             ("aws ecr describe-images --repository-name aptos/validator --image-ids imageTag=potato", RunResult(1, b"")),
-            ("git rev-parse HEAD~1", RunResult(0, b"lychee")),
+            ("git rev-parse HEAD~1", RunResult(0, b"lychee\n")),
             ("aws ecr describe-images --repository-name aptos/validator --image-ids imageTag=lychee", RunResult(0, b"")),
         ]))
         git = Git(shell)
-        image_tag = find_recent_image(shell, git)
-        self.assertEqual(image_tag, "lychee")
+        image_tags = find_recent_images(shell, git, 1)
+        self.assertEqual(list(image_tags), ["lychee"])
         shell.assert_commands(self)
 
     def testDidntFindRecentImage(self):
         shell = SpyShell(OrderedDict([
-            ("git rev-parse HEAD~0", RunResult(0, b"crab")),
+            ("git rev-parse HEAD~0", RunResult(0, b"crab\n")),
             ("aws ecr describe-images --repository-name aptos/validator --image-ids imageTag=crab", RunResult(1, b"")),
         ]))
         git = Git(shell)
         with self.assertRaises(Exception):
-            find_recent_image(shell, git, commit_threshold=1)
+            list(find_recent_images(shell, git, 1, commit_threshold=1))
 
 
 class ForgeFormattingTests(unittest.TestCase):
@@ -405,3 +407,30 @@ class ForgeMainTests(unittest.TestCase):
             "GE COMMENT=====\n",
             repr(comment),
         )
+
+
+class TestListClusters(unittest.TestCase):
+    def testListClusters(self):
+        fake_clusters = (
+            json.dumps({
+                "clusters": [
+                    "banana-fake-1",
+                    "aptos-forge-banana-1",
+                    "aptos-forge-potato-2",
+                ],
+            })
+        )
+        shell = SpyShell(OrderedDict([
+            ("aws eks list-clusters", RunResult(0, fake_clusters.encode())),
+        ]))
+        clusters = list_eks_clusters(shell)
+        self.assertEqual(clusters, ["aptos-forge-banana-1", "aptos-forge-potato-2"])
+        shell.assert_commands(self)
+
+    def testListClustersFails(self):
+        with self.assertRaises(Exception):
+            shell = SpyShell(OrderedDict([
+                ("Blah", RunResult(0, b"")),
+            ]))
+            list_eks_clusters(shell)
+            shell.assert_commands(self)
